@@ -1,0 +1,194 @@
+#include <pcap.h>
+#include <stdio.h>
+#include <errno.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <netinet/if_ether.h>
+#include <net/ethernet.h>
+#include <netinet/ether.h>
+#include <netinet/tcp.h>
+#include <ctype.h>
+#include <string.h>
+
+
+struct my_json{
+    char eth_dst[17];
+    char eth_src[17];
+    char ip_dst[15];
+    char ip_src[15];
+    int tcp_sport;
+    int tcp_dport;
+    char name[16];
+    char message[64];
+};
+void handle_tcp(u_char *args, const struct pcap_pkthdr* pkthdr, const u_char* packet, u_int16_t len, struct my_json* mj);
+void handle_ip(u_char *args, const struct pcap_pkthdr* pkthdr, const u_char* packet, struct my_json* mj);
+void callback(u_char* args, const struct pcap_pkthdr* pkthdr, const u_char* packet);
+void save_json_to_file(struct  my_json* mj);
+
+
+
+struct my_ip {
+    u_int8_t    ip_vhl;
+#define IP_V(ip)    (((ip)->ip_vhl & 0xf0) >> 4)
+#define IP_HL(ip)   ((ip)->ip_vhl & 0x0f)
+    u_int8_t    ip_tos;
+    u_int16_t   ip_len;
+    u_int16_t   ip_id;
+    u_int16_t   ip_off;
+#define IP_DF 0x4000
+#define IP_MF 0x2000
+#define IP_OFFMASK 0x01fff
+    u_int8_t    ip_ttl;
+    u_int8_t    ip_p;
+    u_int16_t   ip_sum;
+    struct  in_addr ip_src, ip_dst;
+};
+
+void save_json_to_file(struct  my_json* mj){
+    FILE *fout;
+    fout = fopen("/media/koqpe/bbc80691-6cbb-4f40-a821-d03a33fc3efb/out.json", "w");
+    printf("{eth_dst:\"%s\",eth_src:\"%s\",ip_dst:\"%s\",ip_src:\"%s\",tcp_sport:%d,tcp_dport:%d,name:\"%s\",message:\"%s\"};\n", mj->eth_dst, mj->eth_src, mj->ip_dst, mj->ip_src, mj->tcp_sport, mj->tcp_dport, mj->name, mj->message);
+    fprintf(fout, "{eth_dst:\"%s\",eth_src:\"%s\",ip_dst:\"%s\",ip_src:\"%s\",tcp_sport:%d,tcp_dport:%d,name:\"%s\",message:\"%s\"};\n", mj->eth_dst, mj->eth_src, mj->ip_dst, mj->ip_src, mj->tcp_sport, mj->tcp_dport, mj->name, mj->message);
+    printf("work");
+    fclose(fout);
+}
+
+void ascii_print_with_offset(register const u_char *cp, register u_int length, struct my_json* mj){
+    register u_int i=0;
+    register int s1, s2;
+    register int nshorts;
+    char message[500], *msg, *start;
+    msg=message;
+    nshorts=length/sizeof(u_short);
+    while(--nshorts>=0) {
+        s1=*cp++;
+        s2=*cp++;
+	if (isgraph(s1) || s1 == ' '){
+        	*(msg++)=s1;
+	}
+	if (isgraph(s2) || s2 == ' '){
+        	*(msg++)=s2;
+	}
+    }
+    *msg = '\0';
+    int l = 0;
+    char Uname[16];
+    char Umessage[64];
+    char foo[]="{len:";
+    for (i=0;i<strlen(message); i++){
+	int flag=1;
+	for (int j=0;j<5;j++){
+    	    if (message[i+j]!=foo[j]){
+		flag=0;
+		break;
+	    }
+	}
+	if (flag==1){
+	    i+=strlen(foo);
+	    int dec = message[i]-'0';
+	    int num = message[i+1]-'0';
+	    if (message[i+2] == ';'){
+	    	l = dec*10 + num;
+	    	i = i +strlen(";name:") + 2;
+	    }else{
+		int num1 = message[i+2]-'0';
+		l = dec*100 + num*10 + num1;
+		i = i + strlen(";name:") + 3;
+	    }
+	    printf("%d   ", l);
+	    int j=0;
+	    while (message[i+j]!=';'){
+		Uname[j]=message[i+j];
+		j++;
+	    }
+	    Uname[j] = '\0';
+	    printf("%s", Uname);
+	    memcpy(mj->name, Uname, (strlen(Uname)+1)*sizeof(char));
+	    i=i+j+strlen(";message:");j=0;
+	    while ( i+j < l-1){
+		Umessage[j]=message[i+j];
+		j++;
+	    }
+	    Umessage[j]='\0';
+	    printf("\n%s", Umessage);
+	    memcpy(mj->message, Umessage, (strlen(Umessage)+1)*sizeof(char));
+	    save_json_to_file(mj); 
+	}
+    }
+}
+
+
+
+void handle_ip(u_char *args, const struct pcap_pkthdr* pkthdr, const u_char* packet, struct my_json* mj){
+        struct my_ip* ip;
+        ip=(struct my_ip *)(packet+sizeof(struct ether_header));
+	memcpy(mj->ip_dst, inet_ntoa(ip->ip_dst), strlen(inet_ntoa(ip->ip_dst)));
+	memcpy(mj->ip_src, inet_ntoa(ip->ip_src), strlen(inet_ntoa(ip->ip_src)));
+        printf("IP\tsource: %s ", inet_ntoa(ip->ip_src));
+        printf("dest: %s\n", inet_ntoa(ip->ip_dst));
+        printf("\ttos: %d len: %d id: %d ttl: %d\n", ip->ip_tos, ip->ip_len, ip->ip_id, ip->ip_ttl);
+        if(ip->ip_p==IPPROTO_TCP){ handle_tcp(args, pkthdr, packet, ip->ip_len, mj);
+        } else if(ip->ip_p==IPPROTO_UDP) { printf("(UDP)\n");
+        } else if(ip->ip_p==IPPROTO_ICMP) { printf("(ICMP)\n");
+        } else { printf("UNKNOWN\n"); }
+}
+
+void handle_tcp(u_char *args, const struct pcap_pkthdr* pkthdr, const u_char* packet, u_int16_t len, struct my_json* mj){
+        struct tcphdr* tcp;
+        u_char *data;
+        int iplen = sizeof(struct ether_header) + sizeof(struct my_ip);
+        int tcplen = iplen + sizeof( struct tcphdr);
+        tcp = (struct tcphdr*)( packet + iplen);
+        data = (u_char *)(packet + tcplen);
+        len = len - (sizeof(struct my_ip) + sizeof(struct tcphdr));
+	mj->tcp_sport = ntohs(tcp->th_sport);
+	mj->tcp_dport = ntohs(tcp->th_dport);
+        printf("TCP\tsport: %d", ntohs(tcp->th_sport));
+        printf(" dport: %d\n", ntohs(tcp->th_dport));
+        ascii_print_with_offset(data, len, mj);
+        printf("\n\n");
+}
+
+void callback(u_char* args, const struct pcap_pkthdr* pkthdr, const u_char* packet){
+        struct ether_header *eth;
+	struct my_json mj;
+        eth=(struct ether_header *) packet;
+	memcpy(&mj.eth_src, ether_ntoa((struct ether_addr *)&eth->ether_shost),strlen(ether_ntoa((struct ether_addr *)&eth->ether_shost)));
+	memcpy(&mj.eth_dst, ether_ntoa((struct ether_addr *)&eth->ether_shost), strlen(ether_ntoa((struct ether_addr *)&eth->ether_shost)));
+        printf("ETH\tsource: %s", ether_ntoa((struct ether_addr *)&eth->ether_shost));
+        printf(" dest: %s\n", ether_ntoa((struct ether_addr *)&eth->ether_dhost));
+        u_int16_t etype = ntohs(eth->ether_type);
+        if (etype == ETHERTYPE_IP){
+                handle_ip(args, pkthdr, packet, &mj);
+        }else if (etype == ETHERTYPE_ARP) {
+                printf("(ARP)\n");
+        }else if (etype == ETHERTYPE_REVARP) {
+                printf("(RARP)/n");
+        }else { printf("UNKNOWN\n");}
+}
+
+int main(){
+        char *dev, errbuf[PCAP_ERRBUF_SIZE];
+        bpf_u_int32 net, mask;
+        struct in_addr addr, masks;
+        pcap_t *handle;
+        struct bpf_program fp;
+        struct pcap_pkthdr *header;
+        const u_char *packet;
+        dev = pcap_lookupdev(errbuf);
+        pcap_lookupnet(dev, &net, &mask, errbuf);
+        addr.s_addr = net;
+        masks.s_addr = mask;
+        printf("DEV: %s\n", dev);
+        printf("NET: %s\n", inet_ntoa(addr));
+        printf("MASK: %s\n", inet_ntoa(masks));
+        handle = pcap_open_live(dev, 1024, 1, 0, errbuf);
+        pcap_compile(handle, &fp, "ip proto tcp",0 , net);
+        pcap_setfilter(handle, &fp);
+        pcap_loop(handle, -1, callback, NULL);
+        pcap_close(handle);
+        return 0;
+}
